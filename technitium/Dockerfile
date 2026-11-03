@@ -9,7 +9,7 @@ LABEL \
   io.hass.arch="${BUILD_ARCH}" \
   org.opencontainers.image.title="Technitium DNS Server Home Assistant Add-on" \
   org.opencontainers.image.description="Technitium DNS Server packaged as a Home Assistant OS add-on" \
-  org.opencontainers.image.source="https://github.com/Dion/ha-technitium"
+  org.opencontainers.image.source="https://github.com/axilleas/ha-technitium"
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
