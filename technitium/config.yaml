@@ -5,7 +5,8 @@ description: Run Technitium DNS Server as a Home Assistant OS add-on.
 url: https://github.com/Dion/ha-technitium
 startup: services
 boot: auto
-init: false
+init: true
+timeout: 15
 arch:
   - amd64
   - aarch64
