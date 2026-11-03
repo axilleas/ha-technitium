@@ -1,6 +1,6 @@
 name: Technitium DNS Server
 slug: technitium_dns
-version: 1.0.6
+version: "1.0.7"
 description: Run Technitium DNS Server as a Home Assistant OS add-on.
 url: https://github.com/axilleas/ha-technitium
 startup: services
