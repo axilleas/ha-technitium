@@ -83,6 +83,22 @@ shutdown
 ! kill -0 "$TECHNITIUM_PID" 2>/dev/null
 ''')
 
+    def test_healthcheck_requires_udp_and_tcp_and_rejects_servfail(self):
+        health = ROOT / 'technitium/healthcheck.sh'
+        self.assertTrue(health.exists(), 'DNS healthcheck missing')
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / 'dig'
+            fake.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
+                            'echo ";; ->>HEADER<<- opcode: QUERY, status: ${STATUS:-NOERROR}, id: 1"\n')
+            fake.chmod(0o755)
+            env = {**os.environ, 'PATH': directory + ':' + os.environ['PATH'],
+                   'CALLS': directory + '/calls'}
+            self.assertEqual(subprocess.run(['bash', str(health)], env=env).returncode, 0)
+            calls = Path(env['CALLS']).read_text()
+            self.assertIn('+tcp', calls)
+            self.assertIn('+notcp', calls)
+            self.assertIn('+ignore', calls)  # UDP truncation must not fall back to TCP.
+            self.assertNotEqual(subprocess.run(['bash', str(health)], env={**env, 'STATUS': 'SERVFAIL'}).returncode, 0)
 
 
 if __name__ == '__main__':
