@@ -13,6 +13,7 @@ LABEL \
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+    dnsutils \
     iproute2 \
     nginx \
     procps \
@@ -21,8 +22,9 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
-COPY run.sh /run.sh
-RUN chmod 0755 /run.sh
+COPY run.sh healthcheck.sh /
+HEALTHCHECK --interval=30s --timeout=6s --start-period=90s --retries=3 CMD ["/healthcheck.sh"]
+RUN chmod 0755 /run.sh /healthcheck.sh
 
 EXPOSE 53/tcp 53/udp 5380/tcp 8099/tcp
 ENTRYPOINT ["/run.sh"]

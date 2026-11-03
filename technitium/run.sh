@@ -249,16 +249,19 @@ main() {
   require_file "${TECHNITIUM_APP}"
   require_file "${TECHNITIUM_RUNTIME_CONFIG}"
   require_command ss
+  require_command dig
   require_dotnet_runtime
   /usr/bin/dotnet "${TECHNITIUM_APP}" "${TECHNITIUM_CONFIG_DIR}" &
   TECHNITIUM_PID=$!
   wait_for_port tcp 53 "Technitium DNS" "$TECHNITIUM_PID" 60 || return 1
   wait_for_port udp 53 "Technitium DNS" "$TECHNITIUM_PID" 30 || return 1
   wait_for_port tcp "$TECHNITIUM_WEB_PORT" "Technitium Web UI" "$TECHNITIUM_PID" 60 || return 1
+  /healthcheck.sh || { log error "DNS startup health check failed"; return 1; }
   NGINX_PID=''
   NGINX_RETRY_AT=0
   NGINX_BACKOFF=1
   NGINX_STARTED_AT=0
+  local failed_checks=0 next_check=$SECONDS
   log info "DNS is ready; starting optional Ingress proxy"
   while true; do
     if ! kill -0 "$TECHNITIUM_PID" 2>/dev/null; then
@@ -266,6 +269,19 @@ main() {
       return 1
     fi
     maintain_nginx
+    if (( SECONDS >= next_check )); then
+      if listener_owned tcp 53 "$TECHNITIUM_PID" && listener_owned udp 53 "$TECHNITIUM_PID" && /healthcheck.sh; then
+        failed_checks=0
+      else
+        failed_checks=$((failed_checks + 1))
+        log warning "DNS health check failed (${failed_checks}/3)"
+        if (( failed_checks >= 3 )); then
+          log error "DNS is unhealthy; exiting for Supervisor recovery"
+          return 1
+        fi
+      fi
+      next_check=$((SECONDS + 30))
+    fi
     sleep 1 &
     SLEEP_PID=$!
     wait "$SLEEP_PID" || true
