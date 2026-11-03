@@ -142,14 +142,15 @@ write_nginx_config() {
 worker_processes 1;
 daemon off;
 pid /tmp/nginx.pid;
-error_log /dev/stderr info;
+# Error logs can contain API tokens in request URIs too.
+error_log /dev/null crit;
 
 events {
     worker_connections 1024;
 }
 
 http {
-    access_log /dev/stdout;
+    access_log off;
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
     sendfile on;
