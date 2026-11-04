@@ -1,6 +1,6 @@
 FROM docker.io/technitium/dns-server:15.6.2@sha256:eb48ac5c135f4ab936b536f74f853d53e15ab39ef37fdbc9598a089b90d9f245
 
-ARG BUILD_VERSION=1.0.6
+ARG BUILD_VERSION=1.0.7
 ARG BUILD_ARCH=amd64
 
 LABEL \
