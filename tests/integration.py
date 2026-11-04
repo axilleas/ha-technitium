@@ -38,6 +38,29 @@ def eventually(command, seconds=90):
 
 with tempfile.TemporaryDirectory(prefix='technitium-test-', dir=os.environ.get('TMPDIR')) as directory:
     try:
+        # Launch a real responder outside the wrapper. Its replies must not
+        # satisfy standalone Docker HEALTHCHECK until its identity is registered.
+        docker('run', '-d', '--init', '--name', NAME, '--network', NETWORK,
+               '--tmpfs', '/config:rw', '--entrypoint', 'bash', IMAGE, '-ec',
+               '/usr/bin/dotnet /opt/technitium/dns/DnsServerApp.dll /config/technitium & wait')
+        eventually("dig @127.0.0.1 localhost. A +norecurse +tcp +time=1 +tries=1 | grep -Eq 'status: (NOERROR|REFUSED|NXDOMAIN),'")
+        assert execute('/healthcheck.sh', check=False).returncode != 0, 'Unregistered responder passed healthcheck'
+        execute('sleep 300 & echo $! > /run/unrelated.pid')
+        execute('p=$(cat /run/unrelated.pid); s=$(awk \'{print $22}\' /proc/$p/stat); '
+                'printf "%s %s\\n" "$p" "$s" > /run/technitium.identity')
+        assert execute('/healthcheck.sh', check=False).returncode != 0, 'Sibling responder passed healthcheck'
+        execute('p=$(pgrep -x dotnet); s=$(awk \'{print $22}\' /proc/$p/stat); '
+                'printf "%s %s\\n" "$p" "$s" > /run/technitium.identity')
+        execute('/healthcheck.sh')
+        execute('p=$(pgrep -x dotnet); printf "%s 0\\n" "$p" > /run/technitium.identity')
+        assert execute('/healthcheck.sh', check=False).returncode != 0, 'Stale start time passed healthcheck'
+        # The DNS worker is a real descendant of this container's bash launcher.
+        execute('p=$(ps -o ppid= -p "$(pgrep -x dotnet)" | tr -d " "); '
+                's=$(awk \'{print $22}\' /proc/$p/stat); '
+                'printf "%s %s\\n" "$p" "$s" > /run/technitium.identity')
+        execute('/healthcheck.sh')
+        print('PASS standalone health rejects unregistered/sibling/stale identity, accepts real owner and descendant', flush=True)
+        docker('rm', '-f', NAME)
         docker('run', '-d', '--init', '--name', NAME, '--network', NETWORK,
                '--tmpfs', '/config:rw', IMAGE)
         eventually('test -f /tmp/nginx.pid && /healthcheck.sh')

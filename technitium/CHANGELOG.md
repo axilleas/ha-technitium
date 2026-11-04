@@ -2,6 +2,11 @@
 
 ## 1.0.7
 
+- Share process-tree listener validation between startup and standalone DNS
+  health checks. Record the supervised launch's PID/start time; reject missing,
+  stale or conflicting ownership while accepting legitimate descendant workers.
+  Keep Web UI readiness startup-only so proxy failures cannot take DNS down.
+- Add conflicting-responder, descendant/sibling and stale-identity regressions.
 - Pin official Technitium 15.6.2 to OCI multi-architecture index
   `sha256:eb48ac5c135f4ab936b536f74f853d53e15ab39ef37fdbc9598a089b90d9f245`.
   Docker Registry v2 and Docker Hub tag metadata verified on 2026-11-03:

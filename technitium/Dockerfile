@@ -22,7 +22,7 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
-COPY run.sh healthcheck.sh /
+COPY run.sh healthcheck.sh listeners.sh /
 HEALTHCHECK --interval=30s --timeout=6s --start-period=90s --retries=3 CMD ["/healthcheck.sh"]
 RUN chmod 0755 /run.sh /healthcheck.sh
 

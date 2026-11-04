@@ -11,8 +11,8 @@ jobs:
       - name: Unit tests and shell lint
         run: |
           python3 -m unittest discover -s tests -v
-          bash -n technitium/run.sh technitium/healthcheck.sh
-          shellcheck technitium/run.sh technitium/healthcheck.sh
+          bash -n technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
+          shellcheck technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
       - name: Build pinned image
         run: docker build -t ha-technitium-hardening-test:1.0.7 technitium
       - name: Isolated DNS and lifecycle integration

@@ -14,6 +14,9 @@ start = SOURCE.index('  cat >"${NGINX_CONFIG}" <<NGINX')
 end = SOURCE.index('\nNGINX', start)
 masked = SOURCE[:start] + SOURCE[start:end].replace('\n}', '\n    }') + SOURCE[end:]
 FUNCTIONS = '\n'.join(re.findall(r'^\w+\(\) \{\n.*?^\}', masked, re.M | re.S))
+LIBRARY = ROOT / 'technitium/listeners.sh'
+if LIBRARY.exists():
+    FUNCTIONS += '\n' + LIBRARY.read_text()
 
 
 class RuntimeTests(unittest.TestCase):
@@ -31,14 +34,32 @@ class RuntimeTests(unittest.TestCase):
 
     def test_owned_listener_checks_protocol_port_and_pid(self):
         self.run_shell('''
-ss() { printf '%s\n' "$SOCKET"; }
-SOCKET='LISTEN 0 128 0.0.0.0:53 0.0.0.0:* users:(("dotnet",pid=123,fd=8))'
-listener_owned tcp 53 123
-! listener_owned udp 53 999
-! listener_owned tcp 53 12
-! listener_owned tcp 5380 123
+ss() { [ "$1" = -Hlnpt ] && printf '%s\n' "$SOCKET"; }
+SOCKET="LISTEN 0 128 0.0.0.0:53 0.0.0.0:* users:((\\"dotnet\\",pid=$$,fd=8))"
+listener_owned tcp 53 $$
+! listener_owned udp 53 $$
+! listener_owned tcp 53 99999999
+! listener_owned tcp 5380 $$
 SOCKET='LISTEN 0 128 0.0.0.0:53 0.0.0.0:*'
-! listener_owned tcp 53 123
+! listener_owned tcp 53 $$
+''')
+
+    def test_listener_accepts_descendant_not_sibling_or_partial_pid(self):
+        self.run_shell('''
+# Both sleep processes share the executable and process group, but only one
+# belongs to the supervised launcher. A process-group/name match is unsafe.
+bash -c 'sleep 30 & echo $! > worker; wait' & root=$!
+sleep 30 & sibling=$!
+trap 'kill "$root" "$sibling" "$(cat worker)" 2>/dev/null || true' EXIT
+for ((i=0; i<50; i++)); do [ ! -s worker ] || break; sleep 0.02; done
+worker=$(cat worker)
+ss() { printf 'LISTEN 0 128 0.0.0.0:53 0.0.0.0:* users:(("sleep",pid=%s,fd=8))\\n' "$owner"; }
+owner=$worker
+listener_owned tcp 53 "$root"
+owner=$sibling
+! listener_owned tcp 53 "$root"
+owner=${root}0
+! listener_owned tcp 53 "$root"
 ''')
 
     def test_startup_timeout_fails_and_dead_process_fails(self):
@@ -91,14 +112,33 @@ shutdown
             fake.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
                             'echo ";; ->>HEADER<<- opcode: QUERY, status: ${STATUS:-NOERROR}, id: 1"\n')
             fake.chmod(0o755)
+            identity = Path(directory) / 'identity'
+            pid = os.getpid()
+            start = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+            identity.write_text(f'{pid} {start}\n')
+            ss = Path(directory) / 'ss'
+            ss.write_text('#!/bin/bash\n'
+                          '[[ "$1" != "${MISSING_PROTOCOL:-}" ]] || exit 0\n'
+                          'printf \'LISTEN 0 128 0.0.0.0:53 0.0.0.0:* users:(("python",pid=%s,fd=8))\\n\' "$OWNER"\n')
+            ss.chmod(0o755)
             env = {**os.environ, 'PATH': directory + ':' + os.environ['PATH'],
-                   'CALLS': directory + '/calls'}
+                   'CALLS': directory + '/calls', 'OWNER': str(pid),
+                   'TECHNITIUM_IDENTITY_FILE': str(identity)}
             self.assertEqual(subprocess.run(['bash', str(health)], env=env).returncode, 0)
             calls = Path(env['CALLS']).read_text()
             self.assertIn('+tcp', calls)
             self.assertIn('+notcp', calls)
             self.assertIn('+ignore', calls)  # UDP truncation must not fall back to TCP.
             self.assertNotEqual(subprocess.run(['bash', str(health)], env={**env, 'STATUS': 'SERVFAIL'}).returncode, 0)
+            for missing in ('-Hlnpt', '-Hlnpu'):
+                self.assertNotEqual(subprocess.run(['bash', str(health)], env={**env, 'MISSING_PROTOCOL': missing}).returncode, 0)
+            for owner in ('99999999', str(pid) + '0'):
+                self.assertNotEqual(subprocess.run(['bash', str(health)], env={**env, 'OWNER': owner}).returncode, 0)
+            for stale in (f'{pid} 0\n', '99999999 1\n', 'bad data\n', f'{pid} {start} extra\n'):
+                identity.write_text(stale)
+                self.assertNotEqual(subprocess.run(['bash', str(health)], env=env).returncode, 0)
+            identity.unlink()
+            self.assertNotEqual(subprocess.run(['bash', str(health)], env=env).returncode, 0)
 
 
 if __name__ == '__main__':

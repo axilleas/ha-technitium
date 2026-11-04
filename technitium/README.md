@@ -154,12 +154,22 @@ synchronize from the primary. Verify DNS on the new secondary before uninstallin
 the old app. Preserve backups for recovery; do not promote a secondary merely to
 change repositories.
 
-Startup requires child-owned DNS TCP/UDP sockets and the native Web UI. Missing
-listeners or failed DNS readiness exit nonzero instead of silently continuing.
+Startup requires DNS TCP/UDP sockets and the native Web UI owned by the supervised
+Technitium process or its descendants. Missing listeners or failed DNS readiness
+exit nonzero instead of silently continuing.
 NGINX is optional: failed starts/crashes retry with exponential backoff capped at
 60 seconds without stopping DNS. Request/error logs are disabled in NGINX at all
 log levels to avoid leaking query-string API tokens (including on error paths).
 Technitium's own application/query logs are not redacted by this wrapper.
+
+DNS health validates the wrapper-recorded PID and Linux process start time in
+`/run/technitium.identity`, then requires TCP/UDP port 53 ownership by that process
+or its descendants. Missing/stale identity, hidden socket ownership, and unrelated
+listeners on either protocol fail closed, even if another resolver answers local
+queries. Executable names and shared process groups are not identity checks.
+The identity record is cleared at startup and shutdown. Native Web UI readiness
+is checked only at startup; neither it nor the optional proxy is part of ongoing
+DNS health.
 
 DNS health uses real nonrecursive localhost queries over **both UDP and TCP**;
 it needs no Internet/upstream resolver. NOERROR, NXDOMAIN and REFUSED are valid
@@ -175,8 +185,8 @@ A proxy-only failure must not trigger a whole-container/DNS restart.
 
 ```sh
 python3 -m unittest discover -s tests -v  # from repository root
-bash -n technitium/run.sh technitium/healthcheck.sh
-shellcheck technitium/run.sh technitium/healthcheck.sh
+bash -n technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
+shellcheck technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
 docker build -t ha-technitium-hardening-test:1.0.7 technitium
 python3 tests/integration.py bridge
 ```

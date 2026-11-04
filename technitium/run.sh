@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -e
+# shellcheck source=technitium/listeners.sh
+source "$(dirname "${BASH_SOURCE[0]}")/listeners.sh"
+TECHNITIUM_IDENTITY_FILE="${TECHNITIUM_IDENTITY_FILE:-/run/technitium.identity}"
+export TECHNITIUM_IDENTITY_FILE
 
 TECHNITIUM_CONFIG_DIR="/config/technitium"
 TECHNITIUM_APP="/opt/technitium/dns/DnsServerApp.dll"
@@ -98,19 +102,6 @@ log_listeners() {
   else
     log warning "Cannot list listening sockets because 'ss' is not installed"
   fi
-}
-
-listener_owned() {
-  local protocol="$1" port="$2" pid="$3" flags
-  case "$protocol" in
-    tcp) flags=-Hlnpt ;;
-    udp) flags=-Hlnpu ;;
-    *) return 1 ;;
-  esac
-  # Exact local port and child PID: never accept another host-network service.
-  ss "$flags" | awk -v port="$port" -v pid="$pid" '
-    $4 ~ (":" port "$") && $0 ~ ("pid=" pid ",") { found=1 }
-    END { exit !found }'
 }
 
 wait_for_port() {
@@ -224,6 +215,7 @@ maintain_nginx() {
 
 shutdown() {
   trap '' TERM INT
+  [ -z "${TECHNITIUM_IDENTITY_FILE:-}" ] || rm -f "$TECHNITIUM_IDENTITY_FILE"
   log info "Stopping Technitium DNS Server add-on"
   local pid deadline=$((SECONDS + ${SHUTDOWN_TIMEOUT:-8}))
   for pid in "${NGINX_PID:-}" "${TECHNITIUM_PID:-}" "${SLEEP_PID:-}"; do
@@ -244,6 +236,7 @@ shutdown() {
 main() {
   trap shutdown EXIT
   trap 'exit 0' TERM INT
+  rm -f "$TECHNITIUM_IDENTITY_FILE"
   mkdir -p "${TECHNITIUM_CONFIG_DIR}"
   log info "Starting Technitium DNS Server; wrapper log level ${LOG_LEVEL}"
   require_file "${TECHNITIUM_APP}"
@@ -253,6 +246,9 @@ main() {
   require_dotnet_runtime
   /usr/bin/dotnet "${TECHNITIUM_APP}" "${TECHNITIUM_CONFIG_DIR}" &
   TECHNITIUM_PID=$!
+  read_process "$TECHNITIUM_PID" || return 1
+  # PID alone can be reused; bind independent probes to this launch's start time.
+  (umask 077; printf '%s %s\n' "$TECHNITIUM_PID" "$PROCESS_START" > "$TECHNITIUM_IDENTITY_FILE") || return 1
   wait_for_port tcp 53 "Technitium DNS" "$TECHNITIUM_PID" 60 || return 1
   wait_for_port udp 53 "Technitium DNS" "$TECHNITIUM_PID" 30 || return 1
   wait_for_port tcp "$TECHNITIUM_WEB_PORT" "Technitium Web UI" "$TECHNITIUM_PID" 60 || return 1
@@ -270,7 +266,7 @@ main() {
     fi
     maintain_nginx
     if (( SECONDS >= next_check )); then
-      if listener_owned tcp 53 "$TECHNITIUM_PID" && listener_owned udp 53 "$TECHNITIUM_PID" && /healthcheck.sh; then
+      if /healthcheck.sh; then
         failed_checks=0
       else
         failed_checks=$((failed_checks + 1))
