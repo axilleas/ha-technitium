@@ -1,6 +1,6 @@
-# Axilleas Home Assistant Add-ons
+# Technitium Home Assistant App
 
-This repository is a custom Home Assistant OS add-on repository. It currently contains an add-on for running [Technitium DNS Server](https://technitium.com/dns/) under the Home Assistant Supervisor.
+This repository is a custom Home Assistant OS app repository. It currently contains an app for running [Technitium DNS Server](https://technitium.com/dns/) under the Home Assistant Supervisor.
 
 The add-on is intended for Home Assistant OS or Home Assistant Supervised installations where add-ons are managed by the Supervisor. It does **not** require manual changes to Home Assistant OS and does **not** require starting Docker containers outside Home Assistant.
 
@@ -84,7 +84,6 @@ For critical networks, consider a secondary DNS resolver or a fallback plan befo
 ## Roadmap / future extensions
 
 This version intentionally exposes only classic DNS on port 53 and the HTTP web UI on port 5380. The Home Assistant **Open Web UI** button uses an internal NGINX ingress proxy on add-on port 8099 so the Technitium UI opens inside Home Assistant instead of redirecting the browser to `http://HOME_ASSISTANT_IP:5380`. The proxy injects the Home Assistant Ingress base path and rewrites redirects/cookies so Technitium assets and API calls stay under the Ingress URL. DNS-over-HTTPS (DoH), DNS-over-TLS (DoT), HTTPS for the web UI, and certificate management are possible future extensions, but they are not enabled or enforced by default in this minimal release.
-
 
 ## Security and supported architectures
 

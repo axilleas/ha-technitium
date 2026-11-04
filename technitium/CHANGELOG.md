@@ -17,8 +17,3 @@
   and use Docker init to reap orphaned descendants.
 - Correct repository URLs to axilleas; bump add-on version to 1.0.7.
 - Add isolated regression/integration tests and CI.
-
-**Migration:** A different repository means a separate Supervisor add-on and
-configuration directory. Back up/export the old add-on, stop it, install this
-fork and explicitly import Technitium settings. No automatic migration occurs.
-See README for rollback and verification steps.

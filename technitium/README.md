@@ -121,7 +121,6 @@ Before updating:
 
 Technitium supports encrypted DNS modes such as DNS-over-HTTPS and DNS-over-TLS. Those can be added later together with a clear certificate and port strategy. They are intentionally not enabled in this first minimal Home Assistant add-on version.
 
-
 ## Security and supported architectures
 
 The base image is pinned to Technitium **15.6.2** by a multi-architecture index
