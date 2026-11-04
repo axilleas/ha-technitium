@@ -2,7 +2,7 @@
 
 This add-on runs Technitium DNS Server on Home Assistant OS through the Home Assistant Supervisor.
 
-The initial version is intentionally minimal and stable:
+The initial version is intentionally minimal:
 
 - DNS on port **53/UDP**
 - DNS on port **53/TCP**
@@ -30,7 +30,7 @@ The initial version is intentionally minimal and stable:
 | --- | --- | --- |
 | `log_level` | `info` | Controls the add-on wrapper logs. Use `debug` or `trace` while troubleshooting startup, port binding, NGINX Ingress, or Web UI issues. |
 
-The log level affects the Home Assistant add-on startup wrapper. Technitium application logs and NGINX access/error logs are still streamed to the add-on log output.
+The log level affects the Home Assistant add-on startup wrapper. Technitium application output is unchanged. Only NGINX request and error logs are disabled because request URLs can contain API tokens. Wrapper lifecycle warnings remain available.
 
 ## Web UI
 
@@ -68,7 +68,11 @@ If the test fails, first check whether the add-on is running and whether another
 
 ## Logs
 
-Logs are written to stdout and stderr, so they appear in the Home Assistant add-on log view. On startup, the wrapper logs the configured log level, persistent data directory, application path, container architecture, installed .NET runtimes, whether the native Technitium Web UI starts listening on port 5380, whether the NGINX Ingress proxy starts listening on port 8099, and whether DNS listens on port 53. Set `log_level` to `debug` or `trace` to include directory listings, generated NGINX configuration, Ingress path rewrite details, NGINX access logs, and socket details before and after startup.
+Technitium application output and wrapper lifecycle messages appear in the
+Home Assistant add-on log view. Startup reports .NET runtime checks and
+child-owned TCP/UDP listener readiness. NGINX access and error output are disabled
+at every log level because both can contain API tokens in request URLs. Proxy
+startup failures are reported as sanitized wrapper warnings.
 
 To inspect logs:
 
@@ -96,7 +100,7 @@ Use Home Assistant backups before major changes. A full backup should include th
 
 ## Updates
 
-This minimal add-on builds on the official `technitium/dns-server:latest` container image so the Technitium application and required .NET runtime stay aligned. The image also installs NGINX for Home Assistant Ingress proxying, verifies that the required .NET 10 runtime frameworks are present at build time, and the start script checks them again before launching Technitium. To update Technitium, update/rebuild the add-on image through Home Assistant after a new add-on release is published.
+This add-on pins official Technitium **15.6.2** by multi-architecture index digest (see Dockerfile), retaining amd64, ARM64, ARMv7 and .NET 10. Updates require a reviewed version/digest change; rebuilding does not silently upgrade the base image. The image also installs NGINX for Home Assistant Ingress proxying, verifies that the required .NET 10 runtime frameworks are present at build time, and the start script checks them again before launching Technitium. To update Technitium, update/rebuild the add-on image through Home Assistant after a new add-on release is published.
 
 Before updating:
 
@@ -116,3 +120,78 @@ Before updating:
 ## Future extensions
 
 Technitium supports encrypted DNS modes such as DNS-over-HTTPS and DNS-over-TLS. Those can be added later together with a clear certificate and port strategy. They are intentionally not enabled in this first minimal Home Assistant add-on version.
+
+## Security and supported architectures
+
+The base image is pinned to Technitium **15.6.2** by a multi-architecture index
+digest. Supported targets are `amd64`, `aarch64` and `armv7`. Container runtime
+tests were performed on amd64; native ARM and Home Assistant Supervisor/Ingress
+deployment still need validation.
+
+Host networking means the Docker `EXPOSE` list is not a firewall. Keep DNS and
+management listeners LAN-only, restrict recursion to trusted clients, and prefer
+Technitium HTTPS or authenticated HA Ingress for administration. Never expose an
+open recursive resolver or the admin UI to the Internet.
+
+## Fork migration and recovery
+
+Repository URL: https://github.com/axilleas/ha-technitium
+
+**Switching from another repository creates a separate add-on with a different
+Supervisor repository ID and configuration directory. There is no automatic
+migration.** Back up the old add-on and export settings in the Technitium Web UI
+before changing repositories. Stop the old DNS add-on before starting this one
+(port 53 cannot be shared), then import the export in the new Technitium Web UI.
+Verify zones, settings, credentials and client DNS over UDP and TCP before
+removing the old add-on. Keep the old backup for rollback; stop this fork before
+restarting the old add-on.
+
+For an existing **cluster secondary**, do not blindly restore its cluster identity
+and run both copies. Keep the primary online, stop the old secondary, remove its
+stale membership from the primary if needed, and join this fork as a fresh
+secondary using the same fixed LAN IP. Let settings and catalog-member zones
+synchronize from the primary. Verify DNS on the new secondary before uninstalling
+the old app. Preserve backups for recovery; do not promote a secondary merely to
+change repositories.
+
+Startup requires DNS TCP/UDP sockets and the native Web UI owned by the supervised
+Technitium process or its descendants. Missing listeners or failed DNS readiness
+exit nonzero instead of silently continuing.
+NGINX is optional: failed starts/crashes retry with exponential backoff capped at
+60 seconds without stopping DNS. Request/error logs are disabled in NGINX at all
+log levels to avoid leaking query-string API tokens (including on error paths).
+Technitium's own application/query logs are not redacted by this wrapper.
+
+DNS health validates the wrapper-recorded PID and Linux process start time in
+`/run/technitium.identity`, then requires TCP/UDP port 53 ownership by that process
+or its descendants. Missing/stale identity, hidden socket ownership, and unrelated
+listeners on either protocol fail closed, even if another resolver answers local
+queries. Executable names and shared process groups are not identity checks.
+The identity record is cleared at startup and shutdown. Native Web UI readiness
+is checked only at startup; neither it nor the optional proxy is part of ongoing
+DNS health.
+
+DNS health uses real nonrecursive localhost queries over **both UDP and TCP**;
+it needs no Internet/upstream resolver. NOERROR, NXDOMAIN and REFUSED are valid
+policy responses; SERVFAIL, timeouts and malformed replies fail. This checks DNS
+responsiveness, not external recursive resolution or the correctness of zones.
+Docker HEALTHCHECK reports health; the wrapper exits after three consecutive
+runtime failures, checking every 30 seconds. Enable Home Assistant's **Watchdog**
+for stopped-container recovery. There is deliberately no `dns://` watchdog URL:
+Supervisor documents only HTTP(S)/TCP URL checks, not DNS protocol probes.
+A proxy-only failure must not trigger a whole-container/DNS restart.
+
+## Development checks
+
+```sh
+python3 -m unittest discover -s tests -v  # from repository root
+bash -n technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
+shellcheck technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
+docker build -t ha-technitium-hardening-test:1.0.7 technitium
+python3 tests/integration.py bridge
+```
+
+Integration tests create/remove only uniquely named disposable containers, use
+tmpfs data and publish no ports. On hosts unable to create bridge interfaces,
+`python3 tests/integration.py none` tests via container-local probes instead.
+No running Home Assistant installation is used by these tests.

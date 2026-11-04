@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -e
+# shellcheck source=technitium/listeners.sh
+source "$(dirname "${BASH_SOURCE[0]}")/listeners.sh"
+TECHNITIUM_IDENTITY_FILE="${TECHNITIUM_IDENTITY_FILE:-/run/technitium.identity}"
+export TECHNITIUM_IDENTITY_FILE
 
 TECHNITIUM_CONFIG_DIR="/config/technitium"
 TECHNITIUM_APP="/opt/technitium/dns/DnsServerApp.dll"
@@ -101,40 +105,20 @@ log_listeners() {
 }
 
 wait_for_port() {
-  local port="$1"
-  local name="$2"
-  local attempts="${3:-30}"
-
-  if ! command -v ss >/dev/null 2>&1; then
-    log warning "Skipping ${name} listener check because 'ss' is not installed"
-    return 0
-  fi
-
-  for attempt in $(seq 1 "${attempts}"); do
-    if ss -lntup | grep -Eq ":${port}[[:space:]]"; then
-      log info "${name} is listening on TCP port ${port}"
+  local protocol="$1" port="$2" name="$3" pid="$4" attempts="${5:-30}" attempt
+  for ((attempt=1; attempt<=attempts; attempt++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      log error "${name} process exited during startup"
+      return 1
+    fi
+    if listener_owned "$protocol" "$port" "$pid"; then
+      log info "${name} owns ${protocol} port ${port}"
       return 0
     fi
-
-    if [ -n "${TECHNITIUM_PID:-}" ] && ! kill -0 "${TECHNITIUM_PID}" 2>/dev/null; then
-      log error "Technitium process exited before ${name} started listening"
-      wait "${TECHNITIUM_PID}"
-      exit $?
-    fi
-
-    if [ -n "${NGINX_PID:-}" ] && ! kill -0 "${NGINX_PID}" 2>/dev/null; then
-      log error "NGINX ingress proxy exited before ${name} started listening"
-      wait "${NGINX_PID}"
-      exit $?
-    fi
-
-    log debug "Waiting for ${name} on TCP port ${port} (${attempt}/${attempts})"
     sleep 1
   done
-
-  log warning "${name} did not start listening on TCP port ${port} within ${attempts} seconds"
-  log warning "Current listening sockets:"
-  log_listeners
+  log error "${name} did not bind ${protocol} port ${port} within ${attempts} seconds"
+  return 1
 }
 
 write_nginx_config() {
@@ -142,14 +126,15 @@ write_nginx_config() {
 worker_processes 1;
 daemon off;
 pid /tmp/nginx.pid;
-error_log /dev/stderr info;
+# Error logs can contain API tokens in request URIs too.
+error_log /dev/null crit;
 
 events {
     worker_connections 1024;
 }
 
 http {
-    access_log /dev/stdout;
+    access_log off;
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
     sendfile on;
@@ -198,78 +183,108 @@ NGINX
 }
 
 start_nginx() {
-  require_command nginx
-  write_nginx_config
-  run_debug_command "Generated NGINX ingress proxy configuration" cat "${NGINX_CONFIG}"
-
-  log info "Starting NGINX ingress proxy on TCP port ${INGRESS_PROXY_PORT}; forwarding to Technitium on 127.0.0.1:${TECHNITIUM_WEB_PORT}"
-  nginx -c "${NGINX_CONFIG}" &
+  write_nginx_config || return 1
+  nginx -t -c "${NGINX_CONFIG}" >/dev/null 2>&1 || return 1
+  nginx -c "${NGINX_CONFIG}" >/dev/null 2>&1 &
   NGINX_PID=$!
-  log info "NGINX ingress proxy started with PID ${NGINX_PID}"
+  log info "Starting NGINX ingress proxy (PID ${NGINX_PID})"
+}
+
+maintain_nginx() {
+  if [ -n "${NGINX_PID:-}" ]; then
+    if kill -0 "$NGINX_PID" 2>/dev/null; then
+      if (( SECONDS - NGINX_STARTED_AT >= 60 )) && listener_owned tcp "$INGRESS_PROXY_PORT" "$NGINX_PID"; then
+        NGINX_BACKOFF=1
+      fi
+      return 0
+    fi
+    wait "$NGINX_PID" || true
+    NGINX_PID=''
+    log warning "Ingress proxy exited; DNS remains running"
+  fi
+  if (( SECONDS < NGINX_RETRY_AT )); then
+    return 0
+  fi
+  if ! start_nginx; then
+    log warning "Ingress proxy could not start; DNS remains running"
+  fi
+  NGINX_STARTED_AT=$SECONDS
+  NGINX_RETRY_AT=$((SECONDS + NGINX_BACKOFF))
+  NGINX_BACKOFF=$((NGINX_BACKOFF < 30 ? NGINX_BACKOFF * 2 : 60))
 }
 
 shutdown() {
+  trap '' TERM INT
+  [ -z "${TECHNITIUM_IDENTITY_FILE:-}" ] || rm -f "$TECHNITIUM_IDENTITY_FILE"
   log info "Stopping Technitium DNS Server add-on"
-  if [ -n "${NGINX_PID:-}" ] && kill -0 "${NGINX_PID}" 2>/dev/null; then
-    kill -TERM "${NGINX_PID}"
-    wait "${NGINX_PID}" || true
-  fi
-  if [ -n "${TECHNITIUM_PID:-}" ] && kill -0 "${TECHNITIUM_PID}" 2>/dev/null; then
-    kill -TERM "${TECHNITIUM_PID}"
-    wait "${TECHNITIUM_PID}" || true
-  fi
+  local pid deadline=$((SECONDS + ${SHUTDOWN_TIMEOUT:-8}))
+  for pid in "${NGINX_PID:-}" "${TECHNITIUM_PID:-}" "${SLEEP_PID:-}"; do
+    [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "${NGINX_PID:-}" "${TECHNITIUM_PID:-}" "${SLEEP_PID:-}"; do
+    [ -n "$pid" ] || continue
+    while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+      sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
 }
 
-trap shutdown TERM INT
+main() {
+  trap shutdown EXIT
+  trap 'exit 0' TERM INT
+  rm -f "$TECHNITIUM_IDENTITY_FILE"
+  mkdir -p "${TECHNITIUM_CONFIG_DIR}"
+  log info "Starting Technitium DNS Server; wrapper log level ${LOG_LEVEL}"
+  require_file "${TECHNITIUM_APP}"
+  require_file "${TECHNITIUM_RUNTIME_CONFIG}"
+  require_command ss
+  require_command dig
+  require_dotnet_runtime
+  /usr/bin/dotnet "${TECHNITIUM_APP}" "${TECHNITIUM_CONFIG_DIR}" &
+  TECHNITIUM_PID=$!
+  read_process "$TECHNITIUM_PID" || return 1
+  # PID alone can be reused; bind independent probes to this launch's start time.
+  (umask 077; printf '%s %s\n' "$TECHNITIUM_PID" "$PROCESS_START" > "$TECHNITIUM_IDENTITY_FILE") || return 1
+  wait_for_port tcp 53 "Technitium DNS" "$TECHNITIUM_PID" 60 || return 1
+  wait_for_port udp 53 "Technitium DNS" "$TECHNITIUM_PID" 30 || return 1
+  wait_for_port tcp "$TECHNITIUM_WEB_PORT" "Technitium Web UI" "$TECHNITIUM_PID" 60 || return 1
+  /healthcheck.sh || { log error "DNS startup health check failed"; return 1; }
+  NGINX_PID=''
+  NGINX_RETRY_AT=0
+  NGINX_BACKOFF=1
+  NGINX_STARTED_AT=0
+  local failed_checks=0 next_check=$SECONDS
+  log info "DNS is ready; starting optional Ingress proxy"
+  while true; do
+    if ! kill -0 "$TECHNITIUM_PID" 2>/dev/null; then
+      log error "Technitium process exited unexpectedly"
+      return 1
+    fi
+    maintain_nginx
+    if (( SECONDS >= next_check )); then
+      if /healthcheck.sh; then
+        failed_checks=0
+      else
+        failed_checks=$((failed_checks + 1))
+        log warning "DNS health check failed (${failed_checks}/3)"
+        if (( failed_checks >= 3 )); then
+          log error "DNS is unhealthy; exiting for Supervisor recovery"
+          return 1
+        fi
+      fi
+      next_check=$((SECONDS + 30))
+    fi
+    sleep 1 &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" || true
+    SLEEP_PID=''
+  done
+}
 
-mkdir -p "${TECHNITIUM_CONFIG_DIR}"
-
-log info "Starting Technitium DNS Server add-on"
-log info "Configured wrapper log level: ${LOG_LEVEL}"
-log info "Persistent data directory: ${TECHNITIUM_CONFIG_DIR}"
-log info "Technitium application: ${TECHNITIUM_APP}"
-log info "Technitium native web UI port: ${TECHNITIUM_WEB_PORT}"
-log info "Home Assistant ingress proxy port: ${INGRESS_PROXY_PORT}"
-log info "Container architecture: $(uname -m)"
-
-require_file "${TECHNITIUM_APP}"
-require_file "${TECHNITIUM_RUNTIME_CONFIG}"
-require_dotnet_runtime
-
-run_debug_command "Technitium runtime configuration" cat "${TECHNITIUM_RUNTIME_CONFIG}"
-run_debug_command "Technitium application directory" ls -la /opt/technitium/dns
-run_debug_command "Persistent data directory details" ls -la "${TECHNITIUM_CONFIG_DIR}"
-run_debug_command "Listening sockets before Technitium start" log_listeners
-
-log info "Launching Technitium DNS Server"
-/usr/bin/dotnet "${TECHNITIUM_APP}" "${TECHNITIUM_CONFIG_DIR}" &
-TECHNITIUM_PID=$!
-log info "Technitium process started with PID ${TECHNITIUM_PID}"
-
-wait_for_port "${TECHNITIUM_WEB_PORT}" "Technitium native web UI" 60
-start_nginx
-wait_for_port "${INGRESS_PROXY_PORT}" "Home Assistant ingress proxy" 30
-wait_for_port 53 "Technitium DNS TCP service" 30
-
-if [ "${LOG_LEVEL_NUMBER}" -le 1 ]; then
-  log debug "Listening sockets after startup"
-  log_listeners
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-log info "Technitium DNS Server is running; Web UI is available through Home Assistant Ingress on add-on port ${INGRESS_PROXY_PORT}"
-
-while true; do
-  if ! kill -0 "${TECHNITIUM_PID}" 2>/dev/null; then
-    log error "Technitium process stopped unexpectedly"
-    wait "${TECHNITIUM_PID}"
-    exit $?
-  fi
-
-  if ! kill -0 "${NGINX_PID}" 2>/dev/null; then
-    log error "NGINX ingress proxy stopped unexpectedly"
-    wait "${NGINX_PID}"
-    exit $?
-  fi
-
-  sleep 5
-done

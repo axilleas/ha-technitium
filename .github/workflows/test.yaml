@@ -1,0 +1,19 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests and shell lint
+        run: |
+          python3 -m unittest discover -s tests -v
+          bash -n technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
+          shellcheck technitium/run.sh technitium/healthcheck.sh technitium/listeners.sh
+      - name: Build pinned image
+        run: docker build -t ha-technitium-hardening-test:1.0.7 technitium
+      - name: Isolated DNS and lifecycle integration
+        run: python3 tests/integration.py bridge
