@@ -1,6 +1,6 @@
 # Dion Home Assistant Add-ons
 
-This repository is a custom Home Assistant OS add-on repository. It currently contains a stable minimal add-on for running [Technitium DNS Server](https://technitium.com/dns/) under the Home Assistant Supervisor.
+This repository is a custom Home Assistant OS add-on repository. It currently contains an add-on for running [Technitium DNS Server](https://technitium.com/dns/) under the Home Assistant Supervisor.
 
 The add-on is intended for Home Assistant OS or Home Assistant Supervised installations where add-ons are managed by the Supervisor. It does **not** require manual changes to Home Assistant OS and does **not** require starting Docker containers outside Home Assistant.
 
@@ -51,7 +51,7 @@ This add-on uses `host_network: true` for the first minimal version. That is the
 
 ## Add-on logging
 
-The add-on includes a `log_level` option. Keep it at `info` for normal use. Temporarily switch it to `debug` or `trace` when diagnosing startup, Web UI, Ingress, or port-binding issues. Debug logs include .NET runtime checks, NGINX ingress proxy configuration, Ingress path rewriting, and listening socket information.
+The add-on includes a `log_level` option. Keep it at `info` for normal use. Temporarily switch it to `debug` or `trace` when diagnosing startup, Web UI, Ingress, or port-binding issues. The wrapper reports startup ownership/readiness and DNS/proxy lifecycle failures. NGINX request and error logs are always disabled to avoid leaking API tokens.
 
 ## Persistent data
 
@@ -84,3 +84,50 @@ For critical networks, consider a secondary DNS resolver or a fallback plan befo
 ## Roadmap / future extensions
 
 This version intentionally exposes only classic DNS on port 53 and the HTTP web UI on port 5380. The Home Assistant **Open Web UI** button uses an internal NGINX ingress proxy on add-on port 8099 so the Technitium UI opens inside Home Assistant instead of redirecting the browser to `http://HOME_ASSISTANT_IP:5380`. The proxy injects the Home Assistant Ingress base path and rewrites redirects/cookies so Technitium assets and API calls stay under the Ingress URL. DNS-over-HTTPS (DoH), DNS-over-TLS (DoT), HTTPS for the web UI, and certificate management are possible future extensions, but they are not enabled or enforced by default in this minimal release.
+
+
+## Security and supported architectures
+
+The base image is pinned to Technitium **15.6.2** by a multi-architecture index
+digest. Supported targets are `amd64`, `aarch64` and `armv7`. Container runtime
+tests were performed on amd64; native ARM and Home Assistant Supervisor/Ingress
+deployment still need validation.
+
+Host networking means the Docker `EXPOSE` list is not a firewall. Keep DNS and
+management listeners LAN-only, restrict recursion to trusted clients, and prefer
+Technitium HTTPS or authenticated HA Ingress for administration. Never expose an
+open recursive resolver or the admin UI to the Internet.
+
+## Startup and recovery
+
+Startup requires child-owned DNS TCP/UDP sockets and the native Web UI. Missing
+listeners or failed DNS readiness exit nonzero instead of silently continuing.
+NGINX is optional: failed starts/crashes retry with exponential backoff capped at
+60 seconds without stopping DNS. Request/error logs are disabled in NGINX at all
+log levels to avoid leaking query-string API tokens (including on error paths).
+Technitium's own application/query logs are not redacted by this wrapper.
+
+DNS health uses real nonrecursive localhost queries over **both UDP and TCP**;
+it needs no Internet/upstream resolver. NOERROR, NXDOMAIN and REFUSED are valid
+policy responses; SERVFAIL, timeouts and malformed replies fail. This checks DNS
+responsiveness, not external recursive resolution or the correctness of zones.
+Docker HEALTHCHECK reports health; the wrapper exits after three consecutive
+runtime failures, checking every 30 seconds. Enable Home Assistant's **Watchdog**
+for stopped-container recovery. There is deliberately no `dns://` watchdog URL:
+Supervisor documents only HTTP(S)/TCP URL checks, not DNS protocol probes.
+A proxy-only failure must not trigger a whole-container/DNS restart.
+
+## Development checks
+
+```sh
+python3 -m unittest discover -s tests -v  # from repository root
+bash -n technitium/run.sh technitium/healthcheck.sh
+shellcheck technitium/run.sh technitium/healthcheck.sh
+docker build -t ha-technitium-hardening-test:1.0.7 technitium
+python3 tests/integration.py bridge
+```
+
+Integration tests create/remove only uniquely named disposable containers, use
+tmpfs data and publish no ports. On hosts unable to create bridge interfaces,
+`python3 tests/integration.py none` tests via container-local probes instead.
+No running Home Assistant installation is used by these tests.
